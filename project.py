@@ -4,9 +4,21 @@ app = Flask(__name__)
 from sqlalchemy import create_engine, asc
 from sqlalchemy.orm import sessionmaker
 from database_setup import Base, Restaurant, MenuItem
+
+
 from flask import session as login_session
 import random, string
 
+from oauth2client.client import flow_from_clientsecrets
+from oauth2client.client import FlowExchangeError
+import httplib2
+import json
+from flask import make_response
+import requests
+
+CLIENT_ID = json.loads(
+    open('client_secrets.json', 'r').read()
+)['web']['client_id']
 
 #Connect to Database and create database session
 engine = create_engine('sqlite:///restaurantmenu.db')
@@ -26,8 +38,9 @@ def restaurantMenuJSON(restaurant_id):
 @app.route('/login')
 def show_login():
     state = ''.join(random.choice(string.ascii_uppercase + string.digits) for x in xrange(32))
-    login_session['state'] = state
-    return "The current session state is %s" %login_session['state']
+    login_session['state'] = 'ABC'
+    print "The current session state is %s" %login_session['state']
+    return render_template('login.html')
 
 @app.route('/restaurant/<int:restaurant_id>/menu/<int:menu_id>/JSON')
 def menuItemJSON(restaurant_id, menu_id):
@@ -143,6 +156,74 @@ def deleteMenuItem(restaurant_id,menu_id):
     else:
         return render_template('deleteMenuItem.html', item = itemToDelete)
 
+@app.route('/gconnect', methods=['POST'])
+def gconnect():
+    print request.args.get('state'), ",", login_session['state']
+    if request.args.get('state') != login_session['state']:
+        response = make_response(json.dumps('Invalid State parameter'), 401)
+        response.headers['Content-Type'] = 'application/json'
+        print "Invalid State parameter", ' 401 ##*%%'
+        return response
+    code = request.data
+    try: #upgrade the authorization code into a credentials object
+        oauth_flow = flow_from_clientsecrets('client_secrets.json', scope='')
+        oauth_flow.redirect_uri = 'postmessage'
+        credentials = oauth_flow.step2_exchange(code)
+    except FlowExchangeError:
+        response = make_response(json.dumps('Failed to upgrade the authorization token'), 401)
+        print "Failed to upgrade the authorization token", ' 401 ##*'
+        response.headers['Content-Type'] = 'application/json'
+        return response
+    #Validate that the access token is valid.
+    access_token = credentials.access_token
+    url = ('https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=%s' % access_token)
+    h = httplib2.Http()
+    result = json.loads(h.request(url, 'GET')[1])
+    #If there was an error in the access token info, abort.
+    if result.get('error') is not None:
+        response = make_response(json.dumps(result.get('error')), 500)
+        response.headers['Content-Type'] = 'application/json'
+        print "Internal Server Error", ' 500 *'
+    # verify that the access code is used for the intended user
+    gplus_id = credentials.id_token['sub']
+    if result['user_id'] != gplus_id:
+        response = make_response(json.dumps("Token's user ID doesn't match  given user ID."), 401)
+        response.headers['Content-Type'] = 'application/json'
+        print "Token's user ID doesn't match  given user ID.", ' 401 *'
+        return response
+    #Verify the access token is valid for the app.
+    if result['issued_to'] != CLIENT_ID:
+        s = "Token's client ID does not match app's."
+        response = make_response(json.dumps(s), 401)
+        response.headers['Content-Type'] = 'application/json'
+        print s, ' 401 *'
+        return response
+    # Verify if the user is already logged in
+    stored_credentials = login_session.get('credentials')
+    stored_gplus_id = login_session.get('gplus_id')
+    if stored_credentials is not None and gplus_id == stored_gplus_id:
+        response = make_response(json.dumps("Current user is already connected"), 200)
+        response.headers['Content-Type'] = 'application/json'
+
+    #Store the access token in the session for later use.
+    login_session['credentials'] = credentials
+    login_session['gplus_id'] = gplus_id
+
+    #Get user info
+    userinfo_url = "https://www.googleapis.com/oauth2/v1/userinfo"
+    params = { 'access_token' : credentials.access_token,
+               'alt': 'json'}
+    answer = requests.get(userinfo_url, params=params)
+    data = json.loads(answer.text)
+
+    login_session['username'] = data['name']
+    login_session['picture'] = data['picture']
+    login_session['email'] = data['email']
+
+    output = '<h1> Welcome, ', login_session['username'], '!</h1> <img src="', login_session['picture'], \
+             '" style = "width: 300px; height: 300px; border-radius: 150px;-webkit-border-radius: 150px;-moz-border-radius: 150px;"> '
+    flash("you are now logged if as %s"%login_session['username'])
+    return output
 
 
 
